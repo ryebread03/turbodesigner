@@ -9,6 +9,25 @@ from turbodesigner.stage import StageCadExport
 from turbodesigner.turbomachinery import TurbomachineryCadExport
 
 
+def stage_z_offsets(turbomachinery: TurbomachineryCadExport) -> list[float]:
+    """Axial offset of each stage in the assembled machine (m).
+
+    Stages are exported to STEP at their own local origin, so anything
+    reassembling them from file has to reapply these. Stages stack toward -Z.
+    """
+    offsets = []
+    z_offset = 0.0
+    for stage in turbomachinery.stages:
+        z_offset -= (
+            stage.stage_gap
+            + stage.stator.disk_height
+            + stage.row_gap
+            + stage.rotor.disk_height
+        )
+        offsets.append(z_offset)
+    return offsets
+
+
 @dataclass
 class AxialStageCadModel:
     """Combined shaft + casing for a single axial compressor stage."""

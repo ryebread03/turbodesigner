@@ -3,7 +3,34 @@ import time
 import click
 
 from turbodesigner.cli.state import load_design, get_output_dir, load_shaft_spec, load_casing_spec, load_blade_spec
-from turbodesigner.cli.utils import design_option, complex_option, visualize_option, save_step
+from turbodesigner.cli.utils import design_option, complex_option, visualize_option, viewer_option, resolve_viewer, save_step
+
+
+def _show_vtk(assembly, title: str) -> str:
+    """Open the native VTK window. Returns a status string for the result payload."""
+    try:
+        from turbodesigner.cad.vtk_viewer import show
+
+        show(assembly, title=title)
+        return "shown in vtk window"
+    except Exception as e:
+        return f"failed ({e})"
+
+
+def _show_vtk_steps(step_paths, title: str, offsets=None) -> str:
+    """Open the native VTK window on already-exported STEP files.
+
+    Multi-stage builds run in subprocesses and return paths rather than
+    assemblies, so the exported STEP is reloaded instead of rebuilt. Stages are
+    exported at their local origin, so offsets restack them.
+    """
+    try:
+        from turbodesigner.cad.vtk_viewer import assembly_from_steps, show
+
+        show(assembly_from_steps(step_paths, offsets=offsets), title=title)
+        return "shown in vtk window"
+    except Exception as e:
+        return f"failed ({e})"
 
 
 @click.group()
@@ -18,8 +45,11 @@ def cad() -> None:
     Default mode is simple (fast, no fasteners). Use --complex for full
     detail but note this takes significantly longer.
 
-    Visualization is on by default and sends geometry to the jupyter_cadquery
-    viewer. Use --no-visualize to disable.
+    Visualization is on by default. --viewer vtk (the default) opens a native
+    window needing no setup; --viewer jcv sends to a running jupyter_cadquery
+    server. Use --no-visualize or --viewer none to disable.
+
+    The vtk window blocks until you close it.
 
     \b
     AI WORKFLOW:
@@ -37,8 +67,9 @@ def cad() -> None:
 @design_option
 @complex_option
 @visualize_option
+@viewer_option
 @click.pass_context
-def cad_blade(ctx: click.Context, stage_num: int, row_type: str, design_name: str | None, complex: bool, visualize: bool) -> None:
+def cad_blade(ctx: click.Context, stage_num: int, row_type: str, design_name: str | None, complex: bool, visualize: bool, viewer: str) -> None:
     """Build CAD for a single blade row.
 
     STAGE_NUM is 1-indexed stage number. ROW_TYPE is 'rotor' or 'stator'.
@@ -68,8 +99,11 @@ def cad_blade(ctx: click.Context, stage_num: int, row_type: str, design_name: st
     component = f"blade-{stage_num}-{row_type}"
     step_path = save_step(assembly, output_dir, component)
 
+    viewer = resolve_viewer(viewer, visualize)
     viz_status = "off"
-    if visualize:
+    if viewer == "vtk":
+        viz_status = _show_vtk(assembly, component)
+    elif viewer == "jcv":
         try:
             from jupyter_cadquery.viewer.client import show
             show(assembly, reset_camera=False)
@@ -93,8 +127,9 @@ def cad_blade(ctx: click.Context, stage_num: int, row_type: str, design_name: st
 @design_option
 @complex_option
 @visualize_option
+@viewer_option
 @click.pass_context
-def cad_shaft(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool) -> None:
+def cad_shaft(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool, viewer: str) -> None:
     """Build all shaft stages in parallel, export STEP files per stage.
 
     WARNING: --complex includes fastener geometry and takes significantly longer.
@@ -115,17 +150,23 @@ def cad_shaft(ctx: click.Context, design_name: str | None, complex: bool, visual
     cad_export = tm.to_cad_export()
     output_dir = get_output_dir(name)
 
+    viewer = resolve_viewer(viewer, visualize)
+
     t0 = time.perf_counter()
     step_paths = ShaftCadModel.build_all(
         cad_export,
         spec=spec,
         output_dir=output_dir,
-        visualize=visualize,
+        visualize=viewer == "jcv",
         is_complex=complex,
     )
     elapsed = time.perf_counter() - t0
 
-    viz_status = "sent to viewer" if visualize else "off"
+    viz_status = {"jcv": "sent to viewer", "none": "off"}.get(viewer, "")
+    if viewer == "vtk":
+        from turbodesigner.cad.compressor import stage_z_offsets
+
+        viz_status = _show_vtk_steps(step_paths, "shaft", stage_z_offsets(cad_export))
 
     result = {
         "component": "shaft",
@@ -146,8 +187,9 @@ def cad_shaft(ctx: click.Context, design_name: str | None, complex: bool, visual
 @design_option
 @complex_option
 @visualize_option
+@viewer_option
 @click.pass_context
-def cad_casing(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool) -> None:
+def cad_casing(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool, viewer: str) -> None:
     """Build all casing stages in parallel, export STEP files per stage.
 
     WARNING: --complex includes fastener geometry and takes significantly longer.
@@ -168,17 +210,23 @@ def cad_casing(ctx: click.Context, design_name: str | None, complex: bool, visua
     cad_export = tm.to_cad_export()
     output_dir = get_output_dir(name)
 
+    viewer = resolve_viewer(viewer, visualize)
+
     t0 = time.perf_counter()
     step_paths = CasingCadModel.build_all(
         cad_export,
         spec=spec,
         output_dir=output_dir,
-        visualize=visualize,
+        visualize=viewer == "jcv",
         is_complex=complex,
     )
     elapsed = time.perf_counter() - t0
 
-    viz_status = "sent to viewer" if visualize else "off"
+    viz_status = {"jcv": "sent to viewer", "none": "off"}.get(viewer, "")
+    if viewer == "vtk":
+        from turbodesigner.cad.compressor import stage_z_offsets
+
+        viz_status = _show_vtk_steps(step_paths, "casing", stage_z_offsets(cad_export))
 
     result = {
         "component": "casing",
@@ -199,8 +247,9 @@ def cad_casing(ctx: click.Context, design_name: str | None, complex: bool, visua
 @design_option
 @complex_option
 @visualize_option
+@viewer_option
 @click.pass_context
-def cad_assembly(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool) -> None:
+def cad_assembly(ctx: click.Context, design_name: str | None, complex: bool, visualize: bool, viewer: str) -> None:
     """Build the complete turbomachinery (shaft + casing) in parallel, export STEP files.
 
     WARNING: --complex includes fastener geometry and takes significantly longer.
@@ -229,7 +278,7 @@ def cad_assembly(ctx: click.Context, design_name: str | None, complex: bool, vis
         shaft_spec=shaft_spec,
         casing_spec=casing_spec,
         output_dir=output_dir,
-        visualize=visualize,
+        visualize=resolve_viewer(viewer, visualize) == "jcv",
         is_complex=complex,
     )
 
@@ -241,7 +290,15 @@ def cad_assembly(ctx: click.Context, design_name: str | None, complex: bool, vis
     elapsed = time.perf_counter() - t0
 
     all_step_paths = results["shaft"] + results["casing"]
-    viz_status = "sent to viewer" if visualize else "off"
+
+    viewer = resolve_viewer(viewer, visualize)
+    viz_status = {"jcv": "sent to viewer", "none": "off"}.get(viewer, "")
+    if viewer == "vtk":
+        from turbodesigner.cad.compressor import stage_z_offsets
+
+        # results["shaft"] and results["casing"] are both one path per stage.
+        offsets = stage_z_offsets(cad_export)
+        viz_status = _show_vtk_steps(all_step_paths, "assembly", offsets + offsets)
 
     result = {
         "component": "assembly",

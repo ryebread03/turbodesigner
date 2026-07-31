@@ -21,7 +21,25 @@ def complex_option(fn: Callable) -> Callable:
 
 def visualize_option(fn: Callable) -> Callable:
     """Shared --visualize/--no-visualize option decorator."""
-    return click.option("--visualize/--no-visualize", default=True, help="Send result to jupyter_cadquery viewer (default: on)")(fn)
+    return click.option("--visualize/--no-visualize", default=True, help="Send result to the viewer (default: on)")(fn)
+
+
+def viewer_option(fn: Callable) -> Callable:
+    """Shared --viewer option decorator."""
+    return click.option(
+        "--viewer",
+        type=click.Choice(["vtk", "jcv", "none"]),
+        default="vtk",
+        help="vtk: native window (default); jcv: jupyter_cadquery server; none: off",
+    )(fn)
+
+
+def resolve_viewer(viewer: str, visualize: bool) -> str:
+    """Combine --viewer with the older --visualize/--no-visualize switch.
+
+    ``--no-visualize`` turns visualization off whichever viewer was named.
+    """
+    return "none" if not visualize else viewer
 
 
 def save_step(assembly: cq.Assembly, output_dir: Path, component_name: str) -> str:

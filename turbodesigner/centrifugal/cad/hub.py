@@ -332,14 +332,14 @@ class HubCadModel:
     def build_assembly(
         spec: HubGeometrySpec,
         output_dir: Optional[Path] = None,
-        visualize: bool = False,
+        viewer: str = "none",
     ) -> cq.Assembly:
-        """Build the hub assembly, optionally exporting STEP and sending to the viewer.
+        """Build the hub assembly, optionally exporting STEP and displaying it.
 
         Args:
             spec: hub geometry specification
             output_dir: directory for STEP export (exports if provided)
-            visualize: send result to jupyter_cadquery viewer
+            viewer: "vtk", "jcv" or "none" — matches the CLI's --viewer choices
 
         Returns:
             cq.Assembly containing the hub solid
@@ -350,12 +350,10 @@ class HubCadModel:
         if output_dir:
             assembly.export(str(Path(output_dir) / "hub.step"))
 
-        if visualize:
-            from jupyter_cadquery.viewer.client import show
-            from turbodesigner.cad.cache import get_tessellation_cache, save_tessellation_cache
+        if viewer != "none":
+            from turbodesigner.cad.display import show_assembly
 
-            show(assembly, name="hub", reset_camera=True, cache=get_tessellation_cache())
-            save_tessellation_cache()
+            show_assembly(assembly, viewer=viewer, name="hub")
 
         return assembly
 

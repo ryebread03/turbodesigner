@@ -1,70 +1,79 @@
-"""Centrifugal CLI: performance requirements -> geometry file -> CAD.
+"""Centrifugal CLI: geometry file -> CAD.
 
-    turbodesigner centrifugal compressor geometry generate
     turbodesigner centrifugal compressor cad build
     turbodesigner centrifugal compressor cad view
 
-Commands work on files in the current directory and do not use the
+Commands read a geometry file from the working directory and do not use the
 ``.turbodesigner`` workspace the axial commands rely on, since centrifugal has
-no design/analysis model yet.
+no design or analysis model yet.
 
-Every command reads the geometry file through the component registry in
-``centrifugal.geometry``, so a newly registered component becomes buildable and
-viewable without changes here.
+Parts are resolved through the registry in ``centrifugal.geometry``, so a newly
+registered part becomes buildable and viewable without changes here.
 """
 
 from pathlib import Path
 
+import cadquery as cq
 import click
 
-from turbodesigner.centrifugal.geometry import COMPONENTS, GeometryFile
-from turbodesigner.centrifugal.performance import PerformanceRequirements, generate_geometry
-from turbodesigner.cli.utils import viewer_option, visualize_option, resolve_viewer
+from turbodesigner.cad.display import show_assembly
+from turbodesigner.centrifugal.geometry import IMPELLER_PARTS, GeometryFile
+from turbodesigner.cli.utils import resolve_viewer, viewer_option, visualize_option
 
-DEFAULT_REQUIREMENTS = "performance_req.json"
 DEFAULT_GEOMETRY = "geometry.json"
 
 
-def component_option(fn):
-    """Shared --component option; repeatable, defaults to everything known."""
+def geometry_option(fn):
+    """Shared --from option naming the geometry file."""
     return click.option(
-        "--component",
-        "components",
-        multiple=True,
-        help=f"Component to act on, repeatable (default: all). Known: {', '.join(sorted(COMPONENTS))}",
+        "--from",
+        "geo_path",
+        default=DEFAULT_GEOMETRY,
+        help=f"Geometry file (default: {DEFAULT_GEOMETRY})",
     )(fn)
 
 
-def _load_geometry(fmt, path: str) -> GeometryFile:
+def part_option(fn):
+    """Shared --part option; repeatable, defaults to every buildable part."""
+    return click.option(
+        "--part",
+        "parts",
+        multiple=True,
+        help=f"Impeller part to act on, repeatable (default: all). Known: {', '.join(sorted(IMPELLER_PARTS))}",
+    )(fn)
+
+
+def _load(fmt, path: str) -> GeometryFile:
     try:
         geometry = GeometryFile.from_file(path)
     except FileNotFoundError:
-        fmt.error(f"Geometry file not found: {path}. Run 'geometry generate' first.")
+        fmt.error(f"Geometry file not found: {path}")
     except Exception as e:
         fmt.error(f"Could not read {path}: {e}")
 
-    for name in geometry.unknown_components():
+    for part in geometry.unknown_parts():
         click.echo(
-            f"NOTE: skipping '{name}' - no builder registered for it yet.", err=True
+            f"NOTE: skipping impeller.{part} - no builder registered for it yet.",
+            err=True,
         )
     return geometry
 
 
-def _select(fmt, geometry: GeometryFile, components) -> list:
-    """Resolve --component selections against the geometry file."""
-    selected = list(components) if components else geometry.known_components()
+def _select(fmt, geometry: GeometryFile, parts) -> list:
+    """Resolve --part selections against the geometry file."""
+    selected = list(parts) if parts else geometry.known_parts()
     if not selected:
         fmt.error(
-            f"No buildable components in the geometry file. "
-            f"Known components: {', '.join(sorted(COMPONENTS))}"
+            "No buildable impeller parts in the geometry file. "
+            f"Known parts: {', '.join(sorted(IMPELLER_PARTS))}"
         )
-    for name in selected:
-        if name not in COMPONENTS:
+    for part in selected:
+        if part not in IMPELLER_PARTS:
             fmt.error(
-                f"Unknown component '{name}'. Known: {', '.join(sorted(COMPONENTS))}"
+                f"Unknown impeller part '{part}'. Known: {', '.join(sorted(IMPELLER_PARTS))}"
             )
-        if name not in geometry.components:
-            fmt.error(f"Geometry file has no '{name}' section.")
+        if part not in geometry.impeller:
+            fmt.error(f"Geometry file has no impeller.{part} section.")
     return selected
 
 
@@ -76,86 +85,18 @@ def centrifugal() -> None:
 
 @centrifugal.group()
 def compressor() -> None:
-    """Centrifugal compressor geometry and CAD.
+    """Centrifugal compressor CAD, built from a geometry file.
 
     \b
     Workflow:
-      1. put performance_req.json in the working directory
-      2. turbodesigner centrifugal compressor geometry generate
-      3. turbodesigner centrifugal compressor cad view
+      1. put geometry.json in the working directory
+      2. turbodesigner centrifugal compressor cad view
 
-    Only the hub is implemented. Other components will read their own section
-    of the same geometry file.
+    The geometry file holds impeller parts as sections - hub, blade,
+    splitter_blade. Only the hub is implemented; each part reads its own
+    section.
     """
     pass
-
-
-@compressor.group()
-def geometry() -> None:
-    """Generate and inspect geometry files."""
-    pass
-
-
-@geometry.command("generate")
-@click.option("--from", "req_path", default=DEFAULT_REQUIREMENTS, help=f"Performance requirements JSON (default: {DEFAULT_REQUIREMENTS})")
-@click.option("--output", "out_path", default=DEFAULT_GEOMETRY, help=f"Geometry file to write (default: {DEFAULT_GEOMETRY})")
-@click.pass_context
-def geometry_generate(ctx: click.Context, req_path: str, out_path: str) -> None:
-    """Size the machine from performance requirements into a geometry file."""
-    fmt = ctx.obj["fmt"]
-
-    try:
-        requirements = PerformanceRequirements.from_file(req_path)
-    except FileNotFoundError:
-        fmt.error(f"Requirements file not found: {req_path}")
-    except Exception as e:
-        fmt.error(f"Could not read {req_path}: {e}")
-
-    geometry_file = generate_geometry(requirements)
-    written = geometry_file.to_file(out_path)
-
-    summary = requirements.summary()
-    result = {
-        "requirements_file": req_path,
-        "geometry_file": written,
-        "components": sorted(geometry_file.components),
-        **{k: round(v, 6) for k, v in summary.items()},
-    }
-    fmt.output(result, lambda d: (
-        f"Sized centrifugal compressor from {d['requirements_file']}\n"
-        f"  Tip speed:        {d['tip_speed_m_per_s']:.1f} m/s\n"
-        f"  Exit diameter:    {d['exit_diameter_m']*1000:.1f} mm\n"
-        f"  Actual work:      {d['actual_work_J_per_kg']/1000:.1f} kJ/kg\n"
-        f"  Outlet total T:   {d['outlet_total_temperature_K']:.1f} K\n"
-        f"  Components:       {', '.join(d['components'])}\n"
-        f"  Geometry file:    {d['geometry_file']}"
-    ))
-
-
-@geometry.command("show")
-@click.option("--from", "geo_path", default=DEFAULT_GEOMETRY, help=f"Geometry file (default: {DEFAULT_GEOMETRY})")
-@click.pass_context
-def geometry_show(ctx: click.Context, geo_path: str) -> None:
-    """Print the components in a geometry file."""
-    fmt = ctx.obj["fmt"]
-    geometry_file = _load_geometry(fmt, geo_path)
-
-    result = {
-        "geometry_file": geo_path,
-        "machine_type": geometry_file.machine_type,
-        "configuration": geometry_file.configuration,
-        "components": geometry_file.components,
-        "buildable": geometry_file.known_components(),
-        "unrecognized": geometry_file.unknown_components(),
-    }
-    fmt.output(result, lambda d: (
-        f"{d['machine_type']} {d['configuration']} - {d['geometry_file']}\n"
-        + "".join(
-            f"  {name} ({'buildable' if name in d['buildable'] else 'no builder'})\n"
-            + "".join(f"      {k}: {v}\n" for k, v in params.items())
-            for name, params in d["components"].items()
-        )
-    ))
 
 
 @compressor.group()
@@ -165,71 +106,60 @@ def cad() -> None:
 
 
 @cad.command("build")
-@click.option("--from", "geo_path", default=DEFAULT_GEOMETRY, help=f"Geometry file (default: {DEFAULT_GEOMETRY})")
+@geometry_option
 @click.option("--output-dir", default=".", type=click.Path(), help="Directory for STEP files (default: .)")
-@component_option
+@part_option
 @click.pass_context
-def cad_build(ctx: click.Context, geo_path: str, output_dir: str, components) -> None:
-    """Build components and export STEP files, without opening a viewer."""
+def cad_build(ctx: click.Context, geo_path: str, output_dir: str, parts) -> None:
+    """Build impeller parts and export STEP files, without opening a viewer."""
     fmt = ctx.obj["fmt"]
-    geometry_file = _load_geometry(fmt, geo_path)
-    selected = _select(fmt, geometry_file, components)
+    geometry = _load(fmt, geo_path)
+    selected = _select(fmt, geometry, parts)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     step_files = []
-    for name, assembly in geometry_file.build_all(only=selected):
-        path = out / f"{name}.step"
+    for part, assembly in geometry.build_impeller(only=selected):
+        path = out / f"{part}.step"
         assembly.export(str(path))
         step_files.append(str(path))
 
-    result = {"geometry_file": geo_path, "components": selected, "step_files": step_files}
+    result = {"geometry_file": geo_path, "parts": selected, "step_files": step_files}
     fmt.output(result, lambda d: (
-        f"Built {', '.join(d['components'])} from {d['geometry_file']}\n"
+        f"Built {', '.join(d['parts'])} from {d['geometry_file']}\n"
         + "".join(f"  STEP: {p}\n" for p in d["step_files"])
     ))
 
 
 @cad.command("view")
-@click.option("--from", "geo_path", default=DEFAULT_GEOMETRY, help=f"Geometry file (default: {DEFAULT_GEOMETRY})")
-@component_option
+@geometry_option
+@part_option
 @visualize_option
 @viewer_option
 @click.pass_context
-def cad_view(ctx: click.Context, geo_path: str, components, visualize: bool, viewer: str) -> None:
-    """Open a viewer on the components in a geometry file.
+def cad_view(ctx: click.Context, geo_path: str, parts, visualize: bool, viewer: str) -> None:
+    """Open a viewer on the impeller parts in a geometry file.
 
     The vtk window blocks until it is closed.
     """
     fmt = ctx.obj["fmt"]
-    geometry_file = _load_geometry(fmt, geo_path)
-    selected = _select(fmt, geometry_file, components)
+    geometry = _load(fmt, geo_path)
+    selected = _select(fmt, geometry, parts)
 
-    built = geometry_file.build_all(only=selected)
+    built = geometry.build_impeller(only=selected)
 
-    viewer = resolve_viewer(viewer, visualize)
-    viz_status = "off"
-    if viewer == "vtk":
-        try:
-            from turbodesigner.cad.vtk_viewer import show
+    # One assembly so the parts share a window and sit in the same frame.
+    impeller = cq.Assembly(name="impeller")
+    for part, assembly in built:
+        impeller.add(assembly, name=part)
 
-            show(*[assembly for _, assembly in built], title=" + ".join(selected))
-            viz_status = "shown in vtk window"
-        except Exception as e:
-            viz_status = f"failed ({e})"
-    elif viewer == "jcv":
-        try:
-            from jupyter_cadquery.viewer.client import show
+    viz_status = show_assembly(
+        impeller, viewer=resolve_viewer(viewer, visualize), name="impeller"
+    )
 
-            for name, assembly in built:
-                show(assembly, name=name, reset_camera=False)
-            viz_status = "sent to viewer"
-        except Exception as e:
-            viz_status = f"failed ({e})"
-
-    result = {"geometry_file": geo_path, "components": selected, "visualize": viz_status}
+    result = {"geometry_file": geo_path, "parts": selected, "visualize": viz_status}
     fmt.output(result, lambda d: (
-        f"Viewed {', '.join(d['components'])} from {d['geometry_file']}\n"
+        f"Viewed {', '.join(d['parts'])} from {d['geometry_file']}\n"
         f"  Visualize: {d['visualize']}"
     ))

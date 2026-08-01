@@ -8,13 +8,9 @@ from turbodesigner.cli.utils import design_option, complex_option, visualize_opt
 
 def _show_vtk(assembly, title: str) -> str:
     """Open the native VTK window. Returns a status string for the result payload."""
-    try:
-        from turbodesigner.cad.vtk_viewer import show
+    from turbodesigner.cad.display import show_assembly
 
-        show(assembly, title=title)
-        return "shown in vtk window"
-    except Exception as e:
-        return f"failed ({e})"
+    return show_assembly(assembly, viewer="vtk", name=title)
 
 
 def _show_vtk_steps(step_paths, title: str, offsets=None) -> str:

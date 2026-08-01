@@ -1,6 +1,0 @@
-{
-  "outer_diameter": 0.2,
-  "axial_length": 0.06,
-  "hub_profile_curve": "sqrt(1 - (1 - x)**2)",
-  "num_profile_points": 201
-}

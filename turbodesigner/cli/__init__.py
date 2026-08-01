@@ -7,6 +7,7 @@ import sys
 from turbodesigner.cli.design import design
 from turbodesigner.cli.analyze import analyze
 from turbodesigner.cli.cad import cad
+from turbodesigner.cli.centrifugal import centrifugal
 
 
 class JsonFormatter:
@@ -97,3 +98,5 @@ def compressor(ctx: click.Context) -> None:
 compressor.add_command(design)
 compressor.add_command(analyze)
 compressor.add_command(cad)
+
+cli.add_command(centrifugal)

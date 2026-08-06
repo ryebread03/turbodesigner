@@ -1,32 +1,37 @@
-"""One place that decides how an assembly reaches a viewer.
+"""One place that decides how geometry reaches a viewer.
 
-Both viewers are reached through ``show_assembly`` so a model or command never
+Both viewers are reached through ``show_model`` so a model or command never
 hardcodes one. Without this the CAD models sent to jupyter-cadquery while the
 CLI opened a VTK window, and ``--viewer`` only applied to one of them.
+
+Assemblies are what the axial models send; a single part goes through as the
+workplane or shape it is, since both viewers take one as readily.
 
 Viewer names match the CLI's ``--viewer`` choices: ``vtk``, ``jcv``, ``none``.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 import cadquery as cq
 
 VIEWERS = ("vtk", "jcv", "none")
 
+Viewable = Union[cq.Assembly, cq.Workplane, cq.Shape]
 
-def show_assembly(
-    assembly: cq.Assembly,
+
+def show_model(
+    model: Viewable,
     viewer: str = "vtk",
     name: Optional[str] = None,
     accumulate: bool = False,
 ) -> str:
-    """Send an assembly to the chosen viewer.
+    """Send geometry to the chosen viewer.
 
     Returns a status string for CLI output rather than raising, so a viewer
     that is not running never fails a build that already produced its STEP.
 
     Args:
-        assembly: geometry to display
+        model: geometry to display — an assembly, workplane or shape
         viewer: "vtk" for a native window (blocks until closed), "jcv" for the
             jupyter-cadquery server, "none" to skip
         name: label for the object in the viewer
@@ -42,7 +47,7 @@ def show_assembly(
         try:
             from turbodesigner.cad.vtk_viewer import show
 
-            show(assembly, title=name or "turbodesigner")
+            show(model, title=name or "turbodesigner")
             return "shown in vtk window"
         except Exception as e:
             return f"failed ({e})"
@@ -53,7 +58,7 @@ def show_assembly(
         from turbodesigner.cad.cache import get_tessellation_cache, save_tessellation_cache
 
         show(
-            assembly,
+            model,
             name=name,
             accumulate=accumulate,
             reset_camera=not accumulate,

@@ -5,8 +5,16 @@
     "hub": {
       "outer_diameter": 0.2,
       "axial_length": 0.06,
-      "hub_profile_curve": "sqrt(1 - (1 - x)**2)",
+      "hub_profile_curve": "((x**2)+0.5)/(1.5)",
+      "base_thickness": 0.008,
       "num_profile_points": 201
+    },
+    "main_blade": {
+      "inlet_shroud_radius": 0.06,
+      "blade_thickness": 0.003,
+      "exit_blade_height": 0.012,
+      "shroud_profile_curve": "1 - sqrt(1 - x**2)",
+      "number_of_blades": 8
     }
   }
 }

@@ -9,11 +9,20 @@ f takes a *fraction of the axial length* and returns a *fraction of the outer
 diameter*, so the curve is written once as f(0 <= x <= 1) <= 1 and reused at any
 physical scale. The local hub radius is r(x) = d(x) / 2.
 
+Past the exit the contour is carried out square by ``base_thickness``, since a
+profile curve meeting the exit face at an angle leaves the rim a knife edge that
+nothing can be machined from. The base is a cylinder at the exit radius, so the
+hub runs to L + base_thickness overall.
+
 The solid is built by sampling r(x) into a meridional line profile, closing that
 profile back to the centerline, and revolving it 360 deg about the machine axis.
 
 The machine axis is +Z, matching the axial CAD models (which stack stages along
 Z in ``turbodesigner/cad/compressor.py``).
+
+The curve evaluator here is shared: other centrifugal curves — the main blade's
+shroud line, say — validate and evaluate through the same whitelist, naming
+themselves so the error points at the field the user wrote.
 """
 
 import ast
@@ -22,13 +31,11 @@ import warnings
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple, Union
+from typing import List, Literal, Tuple, Union
 
 import cadquery as cq
 import numpy as np
 from pydantic import BaseModel, Field, field_validator
-
-from turbodesigner.cad.common import CadColors
 
 # Names a profile curve may reference. Vectorized so a curve evaluates over the
 # whole sample array in one call.
@@ -100,8 +107,12 @@ PROFILE_TOLERANCE = 1e-9
 ProfileInterpolation = Literal["spline", "polyline"]
 
 
-def validate_profile_curve(expression: str) -> str:
+def validate_profile_curve(expression: str, name: str = "hub_profile_curve") -> str:
     """Parse and whitelist-check a normalized profile curve expression.
+
+    Args:
+        expression: the curve to check
+        name: the spec field it came from, so errors name what to fix
 
     Returns the expression unchanged, or raises ValueError describing the
     offending construct.
@@ -109,41 +120,44 @@ def validate_profile_curve(expression: str) -> str:
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as err:
-        raise ValueError(f"hub_profile_curve is not a valid expression: {err}") from err
+        raise ValueError(f"{name} is not a valid expression: {err}") from err
 
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
             raise ValueError(
-                f"hub_profile_curve may not use {type(node).__name__}; "
+                f"{name} may not use {type(node).__name__}; "
                 "curves are arithmetic expressions in x"
             )
         if isinstance(node, ast.Name) and node.id != "x" and node.id not in CURVE_NAMESPACE:
             raise ValueError(
-                f"hub_profile_curve references unknown name '{node.id}'; "
+                f"{name} references unknown name '{node.id}'; "
                 f"available: x, {', '.join(sorted(CURVE_NAMESPACE))}"
             )
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
-                raise ValueError("hub_profile_curve may only call named functions")
+                raise ValueError(f"{name} may only call named functions")
             if node.keywords:
-                raise ValueError("hub_profile_curve function calls may not use keywords")
+                raise ValueError(f"{name} function calls may not use keywords")
 
     return expression
 
 
 def evaluate_profile_curve(
-    expression: str, x: Union[float, np.ndarray]
+    expression: str,
+    x: Union[float, np.ndarray],
+    name: str = "hub_profile_curve",
 ) -> Union[float, np.ndarray]:
     """Evaluate a normalized profile curve f(x) over normalized station(s) x.
 
     Args:
         expression: normalized curve, e.g. "sqrt(1 - (1 - x)**2)"
         x: normalized axial station(s), 0 at the inlet face and 1 at the exit face
+        name: the spec field it came from, so errors name what to fix
 
     Returns:
         f(x) — the local diameter as a fraction of the outer diameter.
     """
-    validate_profile_curve(expression)
+    validate_profile_curve(expression, name)
     x_values = np.asarray(x, dtype=float)
 
     try:
@@ -153,12 +167,12 @@ def evaluate_profile_curve(
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = eval(  # noqa: S307 - expression is whitelist-validated above
-                compile(ast.parse(expression, mode="eval"), "<hub_profile_curve>", "eval"),
+                compile(ast.parse(expression, mode="eval"), f"<{name}>", "eval"),
                 {"__builtins__": {}},
                 {**CURVE_NAMESPACE, "x": x_values},
             )
     except Exception as err:
-        raise ValueError(f"hub_profile_curve failed to evaluate: {err}") from err
+        raise ValueError(f"{name} failed to evaluate: {err}") from err
 
     # A constant curve ("0.8") evaluates to a scalar; broadcast it back over x.
     result = np.broadcast_to(np.asarray(result, dtype=float), x_values.shape).astype(float)
@@ -175,6 +189,14 @@ class HubGeometrySpec(BaseModel):
             "Normalized hub profile d/D = f(x/L), valid over 0 <= x/L <= 1 with f <= 1. "
             "Written in terms of x, e.g. 'sqrt(1 - (1 - x)**2)'"
         )
+    )
+    base_thickness: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Cylinder extruded off the exit face at the exit radius, squaring off the "
+            "rim the profile curve would otherwise leave as a knife edge (m)"
+        ),
     )
     num_profile_points: int = Field(
         default=201,
@@ -273,15 +295,37 @@ class HubCadModel:
         return [(float(r), float(x)) for r, x in zip(self.radii, self.axial_stations)]
 
     @cached_property
+    def exit_radius(self) -> float:
+        """Radius the contour reaches at the exit face, i.e. the rim (m)."""
+        return self.contour_points[-1][0]
+
+    @cached_property
+    def has_base(self) -> bool:
+        """Whether a base is carried off the exit face.
+
+        A contour that ends on the axis has no rim to square off, so a base
+        thickness there would extrude a cylinder of zero radius.
+        """
+        return self.spec.base_thickness > 0.0 and self.exit_radius > 0.0
+
+    @cached_property
+    def total_axial_length(self) -> float:
+        """Overall hub length, profile plus base (m)."""
+        base = self.spec.base_thickness if self.has_base else 0.0
+        return float(self.spec.axial_length + base)
+
+    @cached_property
     def closing_points(self) -> List[Tuple[float, float]]:
-        """Points returning the contour to the centerline so it encloses an area.
+        """Points taking the contour through the base and back to the centerline.
 
         A point is omitted where the contour already meets the axis, which would
         otherwise create a zero-length edge.
         """
         points = []
-        if self.contour_points[-1][0] > 0.0:
-            points.append((0.0, float(self.spec.axial_length)))
+        if self.has_base:
+            points.append((self.exit_radius, self.total_axial_length))
+        if self.exit_radius > 0.0:
+            points.append((0.0, self.total_axial_length))
         if self.contour_points[0][0] > 0.0:
             points.append((0.0, 0.0))
         return points
@@ -316,46 +360,10 @@ class HubCadModel:
         """
         return self.hub_profile.revolve(360.0, (0, 0, 0), (0, 1, 0))
 
-    @cached_property
-    def hub_assembly(self) -> cq.Assembly:
-        """Hub solid as a colored assembly."""
-        assembly = cq.Assembly()
-        assembly.add(self.hub_solid, name="Hub", color=CadColors.SHAFT)
-        return assembly
-
     @property
     def volume(self) -> float:
         """Hub solid volume (m^3)."""
         return float(self.hub_solid.val().Volume())
-
-    @staticmethod
-    def build_assembly(
-        spec: HubGeometrySpec,
-        output_dir: Optional[Path] = None,
-        viewer: str = "none",
-    ) -> cq.Assembly:
-        """Build the hub assembly, optionally exporting STEP and displaying it.
-
-        Args:
-            spec: hub geometry specification
-            output_dir: directory for STEP export (exports if provided)
-            viewer: "vtk", "jcv" or "none" — matches the CLI's --viewer choices
-
-        Returns:
-            cq.Assembly containing the hub solid
-        """
-        model = HubCadModel(spec)
-        assembly = model.hub_assembly
-
-        if output_dir:
-            assembly.export(str(Path(output_dir) / "hub.step"))
-
-        if viewer != "none":
-            from turbodesigner.cad.display import show_assembly
-
-            show_assembly(assembly, viewer=viewer, name="hub")
-
-        return assembly
 
 
 def build_hub(spec: HubGeometrySpec) -> cq.Workplane:

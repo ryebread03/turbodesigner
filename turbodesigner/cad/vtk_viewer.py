@@ -8,7 +8,7 @@ and a browser tab open before it will accept anything.
 View only: orbit, pan and zoom. No measurement, sectioning or editing.
 
     from turbodesigner.cad.vtk_viewer import show
-    show(model.hub_assembly)
+    show(model.hub_solid)
 
 ``show`` blocks until the window is closed, which makes it a poor fit inside a
 batch build. Use ``save_screenshot`` to render off-screen to a PNG instead.
